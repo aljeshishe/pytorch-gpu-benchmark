@@ -75,7 +75,6 @@ def train(precision, device):
             model = model.to(device)
             durations = []
             for step, img in enumerate(rand_loader):
-                print(step)
                 img = getattr(img, precision)()
                 if device == 'cuda':
                     torch.cuda.synchronize()
