@@ -1,7 +1,7 @@
-matplotlib
-torchvision
-torch>=1.0.0
-pandas
-plotly
-cufflinks
-psutil
+matplotlib==3.2.2
+torchvision==0.7.0
+torch==1.6.0
+pandas==1.1.5
+plotly==4.4.1
+cufflinks==0.17.3
+psutil==5.4.8
