@@ -32,6 +32,7 @@ MODEL_LIST = {
 precisions = ["float", "half", 'double']
 # For post-voltaic architectures, there is a possibility to use tensor-core at half precision.
 # Due to the gradient overflow problem, apex is recommended for practical use.
+device_name = str(torch.cuda.get_device_name(0))
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch Benchmarking')
 parser.add_argument('--WARM_UP', '-w', type=int, default=5, required=False, help="Num of warm up")
@@ -61,9 +62,9 @@ rand_loader = DataLoader(dataset=RandomDataset(args.BATCH_SIZE * (args.WARM_UP +
                          batch_size=args.BATCH_SIZE, shuffle=False, num_workers=8)
 
 
-def train(precision, device):
+def train(precision='single'):
     """use fake image for training speed test"""
-    target = torch.LongTensor(args.BATCH_SIZE).random_(args.NUM_CLASSES).to(device)
+    target = torch.LongTensor(args.BATCH_SIZE).random_(args.NUM_CLASSES).cuda()
     criterion = nn.CrossEntropyLoss()
     benchmark = {}
     for model_type in MODEL_LIST.keys():
@@ -72,20 +73,17 @@ def train(precision, device):
             if args.NUM_GPU > 1:
                 model = nn.DataParallel(model, device_ids=range(args.NUM_GPU))
             model = getattr(model, precision)()
-            model = model.to(device)
+            model = model.to('cuda')
             durations = []
             for step, img in enumerate(rand_loader):
-                print(step)
                 img = getattr(img, precision)()
-                if device == 'cuda':
-                    torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 start = time.time()
                 model.zero_grad()
-                prediction = model(img.to(device))
+                prediction = model(img.to('cuda'))
                 loss = criterion(prediction, target)
                 loss.backward()
-                if device == 'cuda':
-                    torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 end = time.time()
                 if step >= args.WARM_UP:
                     durations.append((end - start) * 1000)
@@ -96,7 +94,7 @@ def train(precision, device):
     return benchmark
 
 
-def inference(device, precision):
+def inference(precision='float'):
     benchmark = {}
     with torch.no_grad():
         for model_type in MODEL_LIST.keys():
@@ -105,17 +103,15 @@ def inference(device, precision):
                 if args.NUM_GPU > 1:
                     model = nn.DataParallel(model, device_ids=range(args.NUM_GPU))
                 model = getattr(model, precision)()
-                model = model.to(device)
+                model = model.to('cuda')
                 model.eval()
                 durations = []
                 for step, img in enumerate(rand_loader):
                     img = getattr(img, precision)()
-                    if device == 'cuda':
-                        torch.cuda.synchronize()
+                    torch.cuda.synchronize()
                     start = time.time()
-                    model(img.to(device))
-                    if device == 'cuda':
-                        torch.cuda.synchronize()
+                    model(img.to('cuda'))
+                    torch.cuda.synchronize()
                     end = time.time()
                     if step >= args.WARM_UP:
                         durations.append((end - start) * 1000)
@@ -126,32 +122,36 @@ def inference(device, precision):
     return benchmark
 
 
+f"{platform.uname()}\n{psutil.cpu_freq()}\ncpu_count: {psutil.cpu_count()}\nmemory_available: {psutil.virtual_memory().available}"
+
 if __name__ == '__main__':
-    system_configs = f"{platform.uname()}\n{psutil.cpu_freq()}\ncpu_count: {psutil.cpu_count()}" \
-                     f"\nmemory_available: {psutil.virtual_memory().available}"
+    folder_name = args.folder
+
+    device_name = f"{device_name}_{args.NUM_GPU}_gpus_"
+    system_configs = f"{platform.uname()}\n\
+                     {psutil.cpu_freq()}\n\
+                    cpu_count: {psutil.cpu_count()}\n\
+                    memory_available: {psutil.virtual_memory().available}"
+    gpu_configs = [torch.cuda.device_count(), torch.version.cuda, torch.backends.cudnn.version(),
+                   torch.cuda.get_device_name(0)]
+    gpu_configs = list(map(str, gpu_configs))
     temp = ['Number of GPUs on current device : ', 'CUDA Version : ', 'Cudnn Version : ', 'Device Name : ']
 
-    os.makedirs(args.folder, exist_ok=True)
-    with open(os.path.join(args.folder, 'config.json'), 'w') as f:
+    os.makedirs(folder_name, exist_ok=True)
+    with open(os.path.join(folder_name, 'config.json'), 'w') as f:
         json.dump(vars(args), f, indent=2)
     now = datetime.datetime.now()
 
     start_time = now.strftime('%Y/%m/%d %H:%M:%S')
 
     print(f'benchmark start : {start_time}')
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    try:
-        device_name = str(torch.cuda.get_device_name(0))
-    except RuntimeError as ex:
-        device_name = 'cpu'
-    gpu_configs = [torch.cuda.device_count(), torch.version.cuda, torch.backends.cudnn.version(), device_name]
-    gpu_configs = list(map(str, gpu_configs))
+
     for idx, value in enumerate(zip(temp, gpu_configs)):
         gpu_configs[idx] = ''.join(value)
         print(gpu_configs[idx])
     print(system_configs)
 
-    with open(os.path.join(args.folder, "system_info.txt"), "w") as f:
+    with open(os.path.join(folder_name, "system_info.txt"), "w") as f:
         f.writelines(f'benchmark start : {start_time}\n')
         f.writelines('system_configs\n\n')
         f.writelines(system_configs)
@@ -159,19 +159,19 @@ if __name__ == '__main__':
         f.writelines(s + '\n' for s in gpu_configs)
 
     for precision in precisions:
-        train_result = train(precision=precision, device=device)
+        train_result = train(precision)
         train_result_df = pd.DataFrame(train_result)
-        path = f'{args.folder}/{device_name}_{args.NUM_GPU}_gpus_{precision}_model_train_benchmark.csv'
+        path = f'{folder_name}/{device_name}_{precision}_model_train_benchmark.csv'
         train_result_df.to_csv(path, index=False)
 
-        inference_result = inference(precision, device=device)
+        inference_result = inference(precision)
         inference_result_df = pd.DataFrame(inference_result)
-        path = f'{args.folder}/{device_name}_{args.NUM_GPU}_gpus_{precision}_model_inference_benchmark.csv'
+        path = f'{folder_name}/{device_name}_{precision}_model_inference_benchmark.csv'
         inference_result_df.to_csv(path, index=False)
 
     now = datetime.datetime.now()
 
     end_time = now.strftime('%Y/%m/%d %H:%M:%S')
     print(f'benchmark end : {end_time}')
-    with open(os.path.join(args.folder, "system_info.txt"), "a") as f:
+    with open(os.path.join(folder_name, "system_info.txt"), "a") as f:
         f.writelines(f'benchmark end : {end_time}\n')
